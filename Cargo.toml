@@ -1,0 +1,20 @@
+[package]
+name = "irongate"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix-web = "4.4.1"
+color-eyre = { version = "0.6.2", default-features = false }
+compact_jwt = "0.3.3"
+config = "0.13.4"
+log = "0.4.20"
+mini-moka = "0.10.2"
+openidconnect = "3.4.0"
+pretty_env_logger = "0.5.0"
+reqwest = "0.11.23"
+serde = { version = "1.0.193", default-features = false, features = [ "derive" ]}
+serde_json = "1.0.108"
+uuid = { version = "1.6.1", default-features = false, features = [ "v4" ] }
