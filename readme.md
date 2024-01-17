@@ -83,6 +83,7 @@ path = "/"
 ```
 
 ## Usage
+
 ### With HAProxy
 
 ```
@@ -112,7 +113,37 @@ backend backend_secure
   server supersecure [...]
 ```
 
+### With Nginx
+
+```
+server{
+  server_name secure.domain.com;
+    
+  # Use the Nginx auth_request module to verify the JWTs
+  auth_request /oidc/verify;
+  error_page 401 = @auth;
+    
+  # Use /oidc/ for irongate
+  location /oidc/ {
+    # You could do some caching here, but irongate
+    # takes ~0.6 ms to respond.
+    # The caching overhead is probably not worth it.
+    proxy_pass http://127.0.0.1:8080;
+    proxy_pass_request_body off;
+  }
+
+  # Redirect to irongate login
+  location @auth {
+    # You could probably rewrite the url and proxy_pass directly to irongate here
+    # which would save 1 request, similar to what i did with haproxy.
+    return 302 https://spacegli.de/oidc/login?redirect=https://$http_host$request_uri;
+  }
+}
+```
+
+Nginx can't verify the JWTs directly, that is part of the reason why in my testing HAProxy is about twice as fast as Nginx (~20ms compared to ~50ms)
+
 ## Planned features:
- - Add endpoint to verify tokens
  - Parse custom claims and add them to the cookie
  - Support for refresh tokens
+ - Support for JWS

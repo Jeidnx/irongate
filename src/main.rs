@@ -1,7 +1,13 @@
-use actix_web::HttpResponse;
 use actix_web::{cookie::Cookie, get, web, web::Data, App, HttpServer, Responder};
+use actix_web::{HttpRequest, HttpResponse};
 use color_eyre::eyre::{Report, Result};
-use compact_jwt::{crypto::JwsEs256Signer, jwt::Jwt, JwsSigner};
+use compact_jwt::{
+    crypto::JwsEs256Signer,
+    jwt::Jwt,
+    traits::{JwsSignerToVerifier, JwsVerifier},
+    JwsSigner,
+};
+use compact_jwt::{JwsEs256Verifier, JwtUnverified};
 use config::Config;
 use mini_moka::sync::Cache;
 use openidconnect::EmptyAdditionalProviderMetadata;
@@ -18,6 +24,7 @@ use openidconnect::{
     TokenResponse,
 };
 use serde::Deserialize;
+use std::str::FromStr;
 use std::{
     env,
     fs::read,
@@ -108,6 +115,7 @@ struct ConfiguredConfig {
     verify_redirect: bool,
     allowed_redirects: Vec<String>,
     signer: JwsEs256Signer,
+    verifier: JwsEs256Verifier,
     jwt_expiry: Duration,
 }
 
@@ -174,6 +182,9 @@ async fn main() -> Result<(), Report> {
         }
     };
 
+    let jwt_signer = JwsEs256Signer::from_es256_der(&key)?;
+    let jwt_verifier = jwt_signer.get_verifier()?;
+
     let config: ConfiguredConfig = ConfiguredConfig {
         cookie_config: configuration.cookie,
         audience_verifier: Arc::new(verifier),
@@ -181,8 +192,9 @@ async fn main() -> Result<(), Report> {
         error_message: configuration.error_message,
         verify_redirect: configuration.verify_redirect,
         allowed_redirects: configuration.allowed_redirects,
-        signer: JwsEs256Signer::from_es256_der(&key)?,
         jwt_expiry: Duration::from_secs(60 * configuration.jwt_duration),
+        signer: jwt_signer,
+        verifier: jwt_verifier,
     };
 
     let provider_metadata =
@@ -209,6 +221,7 @@ async fn main() -> Result<(), Report> {
             .app_data(client.clone())
             .app_data(sessions.clone())
             .app_data(configured_config.clone())
+            .service(verify)
             .service(login)
             .service(callback)
     })
@@ -220,6 +233,42 @@ async fn main() -> Result<(), Report> {
     .run()
     .await?;
     Ok(())
+}
+
+#[get("/oidc/verify")]
+async fn verify(request: HttpRequest, config: Data<ConfiguredConfig>) -> impl Responder {
+    let cookie = match request.cookie(&config.cookie_config.name) {
+        Some(t) => t,
+        None => {
+            return HttpResponse::Unauthorized();
+        }
+    };
+    let jwt = match JwtUnverified::from_str(cookie.value()) {
+        Ok(t) => t,
+        Err(e) => {
+            info!("Error while trying to parse JWT: {}", e.to_string());
+            return HttpResponse::Unauthorized();
+        }
+    };
+    let verifier = config.verifier.verify::<JwtUnverified<()>>(&jwt);
+
+    match verifier {
+        Ok(verified) => {
+            if verified.exp.is_some_and(|exp| {
+                exp > SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_secs() as i64
+            }) {
+                return HttpResponse::Ok();
+            }
+            HttpResponse::Unauthorized()
+        }
+        Err(e) => {
+            info!("Error while validating JWT: {}", e.to_string());
+            HttpResponse::Unauthorized()
+        }
+    }
 }
 
 #[get("/oidc/login")]
@@ -359,7 +408,6 @@ async fn callback(
         );
     }
 
-    info!("claims: {:#?}", claims.additional_claims());
     let time = SystemTime::now()
         .checked_add(config.jwt_expiry)
         .expect("Jwt expiry overflows data type")
