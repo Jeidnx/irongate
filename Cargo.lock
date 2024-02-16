@@ -327,6 +327,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -478,9 +487,9 @@ dependencies = [
 
 [[package]]
 name = "compact_jwt"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c88e50516e010f137593b9e80dab437bc82c7c7bb4c5bf5dd042e30b0807dd7"
+checksum = "46f626dea95ae258f9d05d2ac8e2fdb1ed98d183e0797ef304b88f205d423144"
 dependencies = [
  "base64 0.21.5",
  "base64urlsafedata",
@@ -1256,9 +1265,11 @@ name = "irongate"
 version = "0.1.0"
 dependencies = [
  "actix-web",
+ "bincode",
  "color-eyre",
  "compact_jwt",
  "config",
+ "flate2",
  "log",
  "mini-moka",
  "openidconnect",
@@ -1267,6 +1278,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

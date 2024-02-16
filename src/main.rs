@@ -1,13 +1,14 @@
 use actix_web::{cookie::Cookie, get, web, web::Data, App, HttpServer, Responder};
 use actix_web::{HttpRequest, HttpResponse};
 use color_eyre::eyre::{Report, Result};
+use compact_jwt::jws::JwsBuilder;
 use compact_jwt::{
     crypto::JwsEs256Signer,
     jwt::Jwt,
     traits::{JwsSignerToVerifier, JwsVerifier},
     JwsSigner,
 };
-use compact_jwt::{JwsEs256Verifier, JwtUnverified};
+use compact_jwt::{JwsCompact, JwsEs256Verifier, JwtUnverified};
 use config::Config;
 use mini_moka::sync::Cache;
 use openidconnect::EmptyAdditionalProviderMetadata;
@@ -23,7 +24,7 @@ use openidconnect::{
     OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, ProviderMetadata, RedirectUrl, Scope,
     TokenResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::{
     env,
@@ -74,6 +75,14 @@ struct CookieConfig {
 }
 
 #[derive(Debug, Deserialize)]
+struct JwtConfig {
+    key_path: String,
+    duration: u64,
+    compress: bool,
+    kid: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct Configuration {
     host: String,
     port: String,
@@ -81,10 +90,15 @@ struct Configuration {
     auth_time: u64,
     verify_redirect: bool,
     allowed_redirects: Vec<String>,
-    key_path: String,
-    jwt_duration: u64,
+    jwt: JwtConfig,
     oidc: OidcConfig,
     cookie: CookieConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Payload {
+    exp: i64,
+    sub: String,
 }
 
 type Sessions = Cache<String, Arc<OidcData>>;
@@ -117,6 +131,7 @@ struct ConfiguredConfig {
     signer: JwsEs256Signer,
     verifier: JwsEs256Verifier,
     jwt_expiry: Duration,
+    compress: bool,
 }
 
 #[actix_web::main]
@@ -145,6 +160,8 @@ async fn main() -> Result<(), Report> {
         .set_default("allowed_redirects", Vec::<String>::with_capacity(0))?
         .set_default("auth_time", 120)?
         .set_default("jwt_duration", 10080)?
+        .set_default("jwt.compress", false)?
+        .set_default("jwt.kid", false)?
         .set_default("key_path", "./private.der")?
         .set_default("cookie.path", "/")?
         .set_default("cookie.name", "vouch")?
@@ -174,15 +191,19 @@ async fn main() -> Result<(), Report> {
         no_verify
     };
 
-    let key = match read(configuration.key_path.clone()) {
+    let key = match read(configuration.jwt.key_path.clone()) {
         Ok(t) => t,
         Err(e) => {
-            error!("Cant read private key '{}': {}", configuration.key_path, e);
+            error!(
+                "Cant read private key '{}': {}",
+                configuration.jwt.key_path, e
+            );
             exit(1);
         }
     };
 
-    let jwt_signer = JwsEs256Signer::from_es256_der(&key)?;
+    let jwt_signer =
+        JwsEs256Signer::from_es256_der(&key)?.set_sign_option_embed_kid(configuration.jwt.kid);
     let jwt_verifier = jwt_signer.get_verifier()?;
 
     let config: ConfiguredConfig = ConfiguredConfig {
@@ -192,7 +213,8 @@ async fn main() -> Result<(), Report> {
         error_message: configuration.error_message,
         verify_redirect: configuration.verify_redirect,
         allowed_redirects: configuration.allowed_redirects,
-        jwt_expiry: Duration::from_secs(60 * configuration.jwt_duration),
+        jwt_expiry: Duration::from_secs(60 * configuration.jwt.duration),
+        compress: configuration.jwt.compress,
         signer: jwt_signer,
         verifier: jwt_verifier,
     };
@@ -235,39 +257,89 @@ async fn main() -> Result<(), Report> {
     Ok(())
 }
 
-#[get("/oidc/verify")]
-async fn verify(request: HttpRequest, config: Data<ConfiguredConfig>) -> impl Responder {
-    let cookie = match request.cookie(&config.cookie_config.name) {
-        Some(t) => t,
-        None => {
-            return HttpResponse::Unauthorized();
-        }
-    };
-    let jwt = match JwtUnverified::from_str(cookie.value()) {
+fn verify_expiry(exp: i64) -> bool {
+    exp > SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs() as i64
+}
+
+fn verify_jwt(jwt_string: &str, verifier: &JwsEs256Verifier) -> bool {
+    let jwt = match JwtUnverified::from_str(jwt_string) {
         Ok(t) => t,
         Err(e) => {
             info!("Error while trying to parse JWT: {}", e.to_string());
-            return HttpResponse::Unauthorized();
+            return false;
         }
     };
-    let verifier = config.verifier.verify::<JwtUnverified<()>>(&jwt);
 
-    match verifier {
+    match verifier.verify::<JwtUnverified<()>>(&jwt) {
         Ok(verified) => {
-            if verified.exp.is_some_and(|exp| {
-                exp > SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_secs() as i64
-            }) {
-                return HttpResponse::Ok();
+            if verified.exp.is_some_and(verify_expiry) {
+                return true;
             }
-            HttpResponse::Unauthorized()
+            false
         }
         Err(e) => {
             info!("Error while validating JWT: {}", e.to_string());
-            HttpResponse::Unauthorized()
+            false
         }
+    }
+}
+
+fn verify_jws(jws_string: &str, verifier: &JwsEs256Verifier) -> bool {
+    let jws = match JwsCompact::from_str(jws_string) {
+        Ok(t) => t,
+        Err(e) => {
+            info!("Error while trying to parse JWS: {}", e.to_string());
+            return false;
+        }
+    };
+
+    match verifier.verify::<JwsCompact>(&jws) {
+        Ok(verified) => {
+            let decompressed = match zstd::decode_all(verified.payload()) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(
+                        "Error while trying to decompress JWS payload: {}",
+                        e.to_string()
+                    );
+                    return false;
+                }
+            };
+            let payload: Payload = match bincode::deserialize(decompressed.as_slice()) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("Error while trying to parse JWS payload: {}", e.to_string());
+                    return false;
+                }
+            };
+            verify_expiry(payload.exp)
+        }
+        Err(e) => {
+            info!("Error while validating JWS: {}", e.to_string());
+            false
+        }
+    }
+}
+
+#[get("/oidc/verify")]
+async fn verify(request: HttpRequest, config: Data<ConfiguredConfig>) -> impl Responder {
+    let Some(cookie) = request.cookie(&config.cookie_config.name) else {
+        return HttpResponse::Unauthorized();
+    };
+
+    let is_valid = if config.compress {
+        verify_jws(cookie.value(), &config.verifier)
+    } else {
+        verify_jwt(cookie.value(), &config.verifier)
+    };
+
+    if is_valid {
+        HttpResponse::Ok()
+    } else {
+        HttpResponse::Unauthorized()
     }
 }
 
@@ -389,6 +461,7 @@ async fn callback(
         }
     };
 
+    //TODO: clean this up
     if let Some(expected_access_token_hash) = claims.access_token_hash() {
         let actual_access_token_hash = AccessTokenHash::from_token(
             token_response.access_token(),
@@ -414,19 +487,39 @@ async fn callback(
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards");
 
-    let token = Jwt::<()> {
-        sub: Some(claims.subject().to_string()),
-        exp: Some(time.as_secs() as i64),
-        ..Default::default()
+    let payload = Payload {
+        exp: (time.as_secs() as i64),
+        sub: claims.subject().to_string(),
     };
 
-    let token_str = config.signer.sign(&token).unwrap().to_string();
+    let token = if config.compress {
+        let Ok(encoded) = bincode::serialize(&payload) else {
+            warn!("Couldn't serialize payload");
+            return HttpResponse::Unauthorized().finish();
+        };
 
-    // Consider setting max-age or expires?
-    let authorization_cookie = Cookie::build(config.cookie_config.name.clone(), token_str)
+        let Ok(compressed) = zstd::encode_all(&encoded[..], 0) else {
+            warn!("Couldn't compress payload");
+            return HttpResponse::Unauthorized().finish();
+        };
+
+        let jws = JwsBuilder::from(compressed).build();
+
+        config.signer.sign(&jws).expect("openssl error").to_string()
+    } else {
+        let jwt = Jwt::<()> {
+            exp: Some(payload.exp),
+            sub: Some(payload.sub),
+            ..Default::default()
+        };
+        config.signer.sign(&jwt).expect("openssl error").to_string()
+    };
+
+    //TODO: Consider setting max-age or expires?
+    let authorization_cookie = Cookie::build(&config.cookie_config.name, token)
         .domain(config.cookie_config.domain.clone().unwrap_or_default())
         .same_site(actix_web::cookie::SameSite::Lax)
-        .path(config.cookie_config.path.clone())
+        .path(&config.cookie_config.path)
         .secure(true)
         .http_only(true)
         .finish();
@@ -437,6 +530,7 @@ async fn callback(
         .finish()
 }
 
+//TODO: rewrite this
 fn is_url_allowed(url: &str, allowed_urls: &Vec<String>) -> bool {
     for allowed in allowed_urls {
         if allowed.ends_with('*') {

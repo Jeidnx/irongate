@@ -23,7 +23,9 @@ name. To change the log level use the `RUST_LOG` environment
 variable.
 
 ### Example configuration
-Contains all possible values
+Contains all possible values. All values that are not
+required have the default value
+
 ```toml
 # The interface to listen on
 host = "127.0.0.1"
@@ -31,13 +33,10 @@ host = "127.0.0.1"
 # The port to listen on
 port = "8080"
 
-# After which time the JWT expires (minutes)
-jwt_duration = 10080 # 7 Days
-
 # This message is displayed on every error, details will be in the server log where needed
 error_message = "Something went wrong. Please try again or contact postmaster@domain.com."
 
-# How long the session is stored on the server before it expires (seconds)
+# How long to wait for the IDP before invalidating the session (seconds)
 auth_time = 120 # 2 Minutes
 
 # Should irongate verify redirect URls
@@ -50,8 +49,19 @@ allowed_redirects = [
   "https://vault.domain.com/landing",
 ]
 
+[jwt]
+
 # Path to the keyfile
 key_path = "./private.der"
+
+# After which time the JWT expires (minutes)
+jwt_duration = 10080 # 7 Days
+
+# Compress the JWT body
+compress = false
+
+# Include the KID in the JWT header
+kid = false
 
 [oidc]
 # OIDC client id (required)
