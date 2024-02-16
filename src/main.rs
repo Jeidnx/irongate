@@ -139,12 +139,12 @@ async fn main() -> Result<(), Report> {
     color_eyre::install()?;
 
     if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "warn")
+        env::set_var("RUST_LOG", "warn");
     }
 
     pretty_env_logger::init();
 
-    let config_path = env::var("CONFIG").unwrap_or("./config.toml".to_owned());
+    let config_path = env::var("CONFIG").unwrap_or(String::from("./config.toml"));
 
     let configuration: Configuration = Config::builder()
         .add_source(config::File::with_name(config_path.as_str()))
@@ -178,9 +178,8 @@ async fn main() -> Result<(), Report> {
                 if a.is_empty() {
                     error!("trusted_audiences has to contain at least one string, otherwise the audience check will always fail.");
                     exit(1);
-                } else {
-                    do_verify
-                }
+                };
+                do_verify
             }
             None => {
                 error!("trusted_audiences is missing in config.toml. Set trusted_audiences or disable audience verification.");
@@ -402,12 +401,9 @@ async fn callback(
 ) -> impl Responder {
     let id = &callback_query.state;
     debug!("Received callback with id: {}", id);
-    let session = match sessions.get(id) {
-        Some(t) => t,
-        None => {
-            info!("Received callback with invalid id.");
-            return HttpResponse::Unauthorized().body(config.error_message.clone());
-        }
+    let Some(session) = sessions.get(id) else {
+        info!("Received callback with invalid id.");
+        return HttpResponse::Unauthorized().body(config.error_message.clone());
     };
     sessions.invalidate(id);
 
@@ -429,15 +425,12 @@ async fn callback(
         }
     };
 
-    let id_token = match token_response.id_token() {
-        Some(t) => t,
-        None => {
-            return respond_unauthorized(
-                "Error while parsing Id token".into(),
-                "The authorization server didn't send an Id token".into(),
-                config.error_message.clone(),
-            )
-        }
+    let Some(id_token) = token_response.id_token() else {
+        return respond_unauthorized(
+            "Error while parsing Id token".into(),
+            "The authorization server didn't send an Id token".into(),
+            config.error_message.clone(),
+        );
     };
 
     let claims = match id_token.claims(
@@ -530,19 +523,13 @@ async fn callback(
         .finish()
 }
 
-//TODO: rewrite this
-fn is_url_allowed(url: &str, allowed_urls: &Vec<String>) -> bool {
-    for allowed in allowed_urls {
-        if allowed.ends_with('*') {
-            let prefix = &allowed[..allowed.len() - 1];
-            if url.starts_with(prefix) {
-                return true;
-            }
-        } else if url == allowed {
-            return true;
+fn is_url_allowed(url: &str, allowed_urls: &[String]) -> bool {
+    allowed_urls.iter().any(|allowed| {
+        if let Some(wildcard) = allowed.strip_suffix('*') {
+            return url.starts_with(wildcard);
         }
-    }
-    false
+        url == allowed
+    })
 }
 
 fn respond_unauthorized(log: String, error: String, error_response: String) -> HttpResponse {
